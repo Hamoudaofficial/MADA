@@ -49,8 +49,9 @@ async function quotaInfo(uid) {
 /* ---------- providers ---------- */
 const have = { gemini: () => !!E.GEMINI_API_KEY, groq: () => !!E.GROQ_API_KEY, cloudflare: () => !!(E.CF_ACCOUNT_ID && E.CF_API_TOKEN) };
 
-function pickOrder(text, opts) {
-  const heavy = text.length > 1500 || /```|برمج|كود|حلل|تحليل|function|code|analy[sz]e|debug|sql|regex/i.test(text) || opts.attachments;
+function pickOrder(text, opts = {}) {
+  const t = String(text || "");
+  const heavy = t.length > 1500 || /```|برمج|كود|حلل|تحليل|function|code|analy[sz]e|debug|sql|regex/i.test(t) || !!opts.attachments;
   let order = heavy ? ["gemini", "groq", "cloudflare"] : ["groq", "gemini", "cloudflare"];
   order = order.filter(p => have[p]());
   if (opts.private || opts.region) order = order.filter(p => p !== "gemini");
@@ -58,6 +59,7 @@ function pickOrder(text, opts) {
 }
 
 async function* sse(res) {
+  if (!res.body) return;
   const rd = res.body.getReader(), dec = new TextDecoder(); let buf = "";
   for (;;) {
     const { done, value } = await rd.read(); if (done) break;
@@ -72,16 +74,16 @@ async function* sse(res) {
 
 const open = {
   async gemini(msgs, sys, sig) {
-    const body = { systemInstruction: { parts: [{ text: sys }] }, contents: msgs.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) };
+    const body = { systemInstruction: { parts: [{ text: sys || "" }] }, contents: msgs.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })) };
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${CFG.gemini.model}:streamGenerateContent?alt=sse`, { method: "POST", signal: sig, headers: { "Content-Type": "application/json", "x-goog-api-key": E.GEMINI_API_KEY }, body: JSON.stringify(body) });
     return { r, pick: j => ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || []).map(x => x.text || "").join("") };
   },
   async groq(msgs, sys, sig) {
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", { method: "POST", signal: sig, headers: { "Content-Type": "application/json", Authorization: "Bearer " + E.GROQ_API_KEY }, body: JSON.stringify({ model: CFG.groq.model, stream: true, messages: [{ role: "system", content: sys }, ...msgs] }) });
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", { method: "POST", signal: sig, headers: { "Content-Type": "application/json", Authorization: "Bearer " + E.GROQ_API_KEY }, body: JSON.stringify({ model: CFG.groq.model, stream: true, messages: [{ role: "system", content: sys || "" }, ...msgs] }) });
     return { r, pick: j => (j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content) || "" };
   },
   async cloudflare(msgs, sys, sig) {
-    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${E.CF_ACCOUNT_ID}/ai/run/${CFG.cloudflare.model}`, { method: "POST", signal: sig, headers: { "Content-Type": "application/json", Authorization: "Bearer " + E.CF_API_TOKEN }, body: JSON.stringify({ stream: true, messages: [{ role: "system", content: sys }, ...msgs] }) });
+    const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${E.CF_ACCOUNT_ID}/ai/run/${CFG.cloudflare.model}`, { method: "POST", signal: sig, headers: { "Content-Type": "application/json", Authorization: "Bearer " + E.CF_API_TOKEN }, body: JSON.stringify({ stream: true, messages: [{ role: "system", content: sys || "" }, ...msgs] }) });
     return { r, pick: j => j.response || "" };
   }
 };
@@ -99,15 +101,21 @@ const countReq = p => q("insert into ai_provider_state(provider,day,requests) va
 
 /* streams from the first healthy provider; fails over only before the first token */
 async function* run(order, msgs, sys, abort) {
-  const blocked = await blockedSet(), used = await usageMap();
-  const hot = p => used[p] >= 0.8 * (CFG[p].rpd || 1e9);
+  const [blocked, used] = await Promise.all([blockedSet(), usageMap()]);
+  const hot = p => (used[p] || 0) >= 0.8 * ((CFG[p] && CFG[p].rpd) || 1e9);
   const chain = [...order.filter(p => !blocked.has(p) && !hot(p)), ...order.filter(p => !blocked.has(p) && hot(p))];
   for (const p of chain) {
+    if (abort.aborted) return;
     const ctl = new AbortController(), onAbort = () => ctl.abort(); abort.addEventListener("abort", onAbort);
     const timer = setTimeout(() => ctl.abort(), 20000);
     try {
       const { r, pick } = await open[p](msgs, sys, ctl.signal);
-      if (!r.ok) { await block(p, r.status === 429 && /day|quota/i.test(await r.text().catch(() => "")));  continue; }
+      if (!r.ok) {
+        let daily = false;
+        if (r.status === 429) { const body = await r.text().catch(() => ""); daily = /day|quota/i.test(body); }
+        await block(p, daily);
+        continue;
+      }
       let first = true;
       for await (const j of sse(r)) {
         const t = pick(j); if (!t) continue;
@@ -166,9 +174,9 @@ const fail = (res, s, code) => res.status(s).json({ error: code });
 const parse = b => { if (typeof b === "string") { try { return JSON.parse(b); } catch (e) { return {}; } } return b || {}; };
 
 async function health(res) {
-  let neonOk = false, neonErr = "";
-  try { await q("select 1"); neonOk = true; } catch (e) { neonErr = String(e.message || e).slice(0, 120); }
-  res.json({ env: { NEON_DATABASE_URL: !!E.NEON_DATABASE_URL, SUPABASE_URL: !!E.SUPABASE_URL, SUPABASE_ANON_KEY: !!E.SUPABASE_ANON_KEY, GEMINI_API_KEY: !!E.GEMINI_API_KEY, GROQ_API_KEY: !!E.GROQ_API_KEY, CF: have.cloudflare() }, neon: neonOk, neon_error: neonErr });
+  let neonOk = false;
+  try { await q("select 1"); neonOk = true; } catch (e) {}
+  res.json({ env: { NEON_DATABASE_URL: !!E.NEON_DATABASE_URL, SUPABASE_URL: !!E.SUPABASE_URL, SUPABASE_ANON_KEY: !!E.SUPABASE_ANON_KEY, GEMINI_API_KEY: !!E.GEMINI_API_KEY, GROQ_API_KEY: !!E.GROQ_API_KEY, CF: have.cloudflare() }, neon: neonOk });
 }
 async function simple(action, req, res) {
   const u = await authUser(req);
@@ -196,9 +204,10 @@ async function chat(req, res) {
   if (!text || text.length > 8000) return fail(res, 400, "bad_request");
   const priv = b.private === true, region = blockedRegion(req.headers["x-vercel-ip-country"]);
   const order = pickOrder(text, { private: priv, region, attachments: !!(b.attachments && b.attachments.length) });
-  if (!order.length) return res.status(503).json({ error: region ? "region_restricted" : "providers_busy", detail: "no AI provider key configured (set GROQ_API_KEY and/or GEMINI_API_KEY in Vercel)" });
+  if (!order.length) return res.status(503).json({ error: region ? "region_restricted" : "providers_busy", detail: "no AI provider key configured" });
   if (!(await takeQuota(user.id))) return fail(res, 429, "quota_exceeded");
 
+  let hb = null;
   try {
     let conv = b.conversation_id;
     if (conv) {
@@ -217,9 +226,10 @@ async function chat(req, res) {
     if (saved) await remember(user.id, saved[1].trim()).catch(() => {});
 
     res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no" });
-    const ev = (e, d) => res.write(`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`);
+    const ev = (e, d) => { if (!res.writableEnded) res.write(`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`); };
     ev("meta", { conversation_id: conv });
-    const ac = new AbortController(); res.on("close", () => ac.abort());
+    const ac = new AbortController(); res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+    hb = setInterval(() => { if (!res.writableEnded) res.write(": ping\n\n"); }, 15000);
 
     let engine = "", out = "", failed = false;
     for await (const x of run(order, [...hist, { role: "user", content: text }], sys, ac.signal)) {
@@ -239,7 +249,9 @@ async function chat(req, res) {
   } catch (e) {
     await refundQuota(user.id);
     if (!res.headersSent) return fail(res, 503, "providers_busy");
-    res.write(`event: error\ndata: ${JSON.stringify({ code: "providers_busy" })}\n\n`); res.end();
+    if (!res.writableEnded) { try { res.write(`event: error\ndata: ${JSON.stringify({ code: "providers_busy" })}\n\n`); } catch (e2) {} res.end(); }
+  } finally {
+    if (hb) clearInterval(hb);
   }
 }
 
@@ -271,8 +283,13 @@ async function convs(action, req, res) {
 const burst = new Map();
 const tooFast = uid => {
   const n = Date.now(), a = (burst.get(uid) || []).filter(t => n - t < 60000);
-  if (a.length >= CONF.ASSIST.PER_MINUTE) { burst.set(uid, a); return true; }
-  a.push(n); burst.set(uid, a); return false;
+  if (a.length >= (CONF.ASSIST.PER_MINUTE || 10)) { burst.set(uid, a); return true; }
+  a.push(n); burst.set(uid, a);
+  if (burst.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of burst) { if (!v.some(t => now - t < 60000)) burst.delete(k); }
+  }
+  return false;
 };
 const clean = s => String(s || "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u2028\u2029]/g, " ").replace(/<[^>]*>/g, " ").replace(/[<>]/g, "").trim();
 async function assist(req, res) {
@@ -287,8 +304,8 @@ async function assist(req, res) {
   if (!order.length) return res.status(503).json({ error: region ? "region_restricted" : "providers_busy" });
   if (tooFast(u.id)) return fail(res, 429, "rate_limited");
   if (!(await takeQuota(u.id))) return fail(res, 429, "quota_exceeded");
-  const ac = new AbortController(); res.on("close", () => ac.abort());
-  const sys = mode === "compose" ? A.COMPOSE_SYSTEM : A.SUMMARY_SYSTEM;
+  const ac = new AbortController(); res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+  const sys = (mode === "compose" ? A.COMPOSE_SYSTEM : A.SUMMARY_SYSTEM) || "";
   const msg = mode === "compose" ? "<idea>" + text + "</idea>" : "<comment>" + text + "</comment>";
   let out = "";
   try { for await (const x of run(order, [{ role: "user", content: msg }], sys, ac.signal)) if (x.text) out += x.text; } catch (e) {}
@@ -307,7 +324,7 @@ module.exports = async (req, res) => {
     if (["quota", "memory", "settings"].includes(action)) return await simple(action, req, res);
     return fail(res, 404, "bad_request");
   } catch (e) {
-    if (!res.headersSent) return res.status(503).json({ error: "providers_busy", detail: String(e.message || e).slice(0, 120) });
-    res.end();
+    if (!res.headersSent) return res.status(503).json({ error: "providers_busy" });
+    if (!res.writableEnded) { try { res.write(`event: error\ndata: ${JSON.stringify({ code: "providers_busy" })}\n\n`); } catch (e2) {} res.end(); }
   }
 };
