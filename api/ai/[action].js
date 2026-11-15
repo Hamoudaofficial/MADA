@@ -2,7 +2,7 @@ const { neon } = require("@neondatabase/serverless");
 const CFG = {
   gemini: { model: "gemini-flash-latest", rpd: 250 },
   groq: { model: "llama-3.3-70b-versatile", rpd: 1000 },
-  cloudflare: { model: "@cf/meta/llama-3.1-8b-instruct", rpd: 400 },
+  cloudflare: { model: "@cf/meta/llama-3.1-8b-instruct-fp8", rpd: 400 },
   embeddings: { model: "@cf/baai/bge-m3", dim: 1024 }
 };
 const E = process.env;
