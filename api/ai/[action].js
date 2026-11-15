@@ -6,7 +6,6 @@ const CFG = {
   embeddings: { model: "@cf/baai/bge-m3", dim: 1024 }
 };
 const E = process.env;
-const CONF = require("../_mada-ai-config");
 let _sql;
 const q = (t, p) => { if (!_sql) _sql = neon(E.NEON_DATABASE_URL); return _sql.query(t, p || []); };
 
@@ -209,7 +208,7 @@ async function chat(req, res) {
 
     const hist = (await q("select role,content from ai_messages where conversation_id=$1 and role in ('user','assistant') order by created_at desc limit 12", [conv])).reverse();
     const memOn = !priv && await memoryOn(user.id);
-    let sys = SYSTEM + "\n\n" + CONF.PLATFORM_INFO;
+    let sys = SYSTEM;
     if (memOn) { const m = await recall(user.id, text); if (m) sys += "\n\nمعلومات يحفظها المستخدم عن نفسه (استخدمها عند الصلة فقط):\n" + m; }
 
     await q("insert into ai_messages(conversation_id,role,content) values($1,'user',$2)", [conv, text]);
@@ -243,67 +242,11 @@ async function chat(req, res) {
   }
 }
 
-/* ---------- conversations (list / open / delete) ---------- */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-async function convs(action, req, res) {
-  const u = await authUser(req);
-  if (!u) return fail(res, 401, "unauthorized");
-  if (action === "conversations") {
-    if (req.method !== "GET") return fail(res, 405, "bad_request");
-    return res.json({ items: await q("select id,title,updated_at from ai_conversations where user_id=$1 order by updated_at desc limit 50", [u.id]) });
-  }
-  const id = String((req.query && req.query.id) || "");
-  if (!UUID.test(id)) return fail(res, 400, "bad_request");
-  if (req.method === "DELETE") {
-    const r = await q("delete from ai_conversations where id=$1 and user_id=$2 returning id", [id, u.id]);
-    if (!r.length) return fail(res, 404, "not_found");
-    q("insert into ai_audit(user_id,action,payload) values($1,'conversation_delete',$2::jsonb)", [u.id, JSON.stringify({ id })]).catch(() => {});
-    return res.json({ ok: true });
-  }
-  if (req.method === "GET") {
-    if (!(await q("select 1 from ai_conversations where id=$1 and user_id=$2", [id, u.id])).length) return fail(res, 404, "not_found");
-    return res.json({ messages: await q("select role,content from ai_messages where conversation_id=$1 and role in ('user','assistant') order by created_at asc limit 200", [id]) });
-  }
-  return fail(res, 405, "bad_request");
-}
-
-/* ---------- comment tools (compose / summarize) ---------- */
-const burst = new Map();
-const tooFast = uid => {
-  const n = Date.now(), a = (burst.get(uid) || []).filter(t => n - t < 60000);
-  if (a.length >= CONF.ASSIST.PER_MINUTE) { burst.set(uid, a); return true; }
-  a.push(n); burst.set(uid, a); return false;
-};
-const clean = s => String(s || "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u2028\u2029]/g, " ").replace(/<[^>]*>/g, " ").replace(/[<>]/g, "").trim();
-async function assist(req, res) {
-  if (req.method !== "POST") return fail(res, 405, "bad_request");
-  const u = await authUser(req);
-  if (!u) return fail(res, 401, "unauthorized");
-  const b = parse(req.body), A = CONF.ASSIST, mode = b.mode, text = typeof b.text === "string" ? clean(b.text) : "";
-  const max = mode === "compose" ? A.COMPOSE_IN_MAX : mode === "summarize" ? A.SUMMARY_IN_MAX : 0;
-  if (!max || !text || text.length > max) return fail(res, 400, "bad_request");
-  const region = blockedRegion(req.headers["x-vercel-ip-country"]);
-  const order = pickOrder(text, { region });
-  if (!order.length) return res.status(503).json({ error: region ? "region_restricted" : "providers_busy" });
-  if (tooFast(u.id)) return fail(res, 429, "rate_limited");
-  if (!(await takeQuota(u.id))) return fail(res, 429, "quota_exceeded");
-  const ac = new AbortController(); res.on("close", () => ac.abort());
-  const sys = mode === "compose" ? A.COMPOSE_SYSTEM : A.SUMMARY_SYSTEM;
-  const msg = mode === "compose" ? "<idea>" + text + "</idea>" : "<comment>" + text + "</comment>";
-  let out = "";
-  try { for await (const x of run(order, [{ role: "user", content: msg }], sys, ac.signal)) if (x.text) out += x.text; } catch (e) {}
-  out = clean(out).replace(/^["«“]+|["»”]+$/g, "").slice(0, mode === "compose" ? A.COMPOSE_OUT_MAX : A.SUMMARY_OUT_MAX).trim();
-  if (!out) { await refundQuota(u.id); return res.status(503).json({ error: "providers_busy" }); }
-  res.json({ text: out });
-}
-
 module.exports = async (req, res) => {
   const action = String((req.query && req.query.action) || "").toLowerCase();
   try {
     if (action === "health") return await health(res);
     if (action === "chat") return await chat(req, res);
-    if (action === "conversations" || action === "conversation") return await convs(action, req, res);
-    if (action === "assist") return await assist(req, res);
     if (["quota", "memory", "settings"].includes(action)) return await simple(action, req, res);
     return fail(res, 404, "bad_request");
   } catch (e) {
