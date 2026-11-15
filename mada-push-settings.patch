@@ -1,0 +1,69 @@
+--- index.orig.html	2026-11-15 13:53:19.192519529 +0000
++++ index.html	2026-11-15 13:53:19.219413176 +0000
+@@ -1981,7 +1981,7 @@
+ .st-nm{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+ .st-row{position:relative;display:flex;align-items:center;gap:var(--st-gap);width:100%;min-height:calc(var(--st-touch) + 14px);padding:10px var(--st-pad);text-align:start;color:var(--tx);background:none;border:0;border-radius:0;transition:background-color .15s}
+ .st-row+.st-row::before,.st-segrow+.st-row::before,.st-row+.st-segrow::before{content:"";position:absolute;top:0;inset-inline-start:calc(var(--st-pad) + var(--st-ic) + var(--st-gap));inset-inline-end:0;height:1px;background:var(--st-sep)}
+-.st-row:active{background:color-mix(in srgb,var(--tx) 8%,transparent)}
++.st-row:disabled{opacity:.5;cursor:not-allowed}.st-row:disabled:active{background:none}.st-row:active{background:color-mix(in srgb,var(--tx) 8%,transparent)}
+ .st-row:focus-visible,.st-prof-b:focus-visible,.st-back:focus-visible,.st-seg button:focus-visible{outline:2px solid var(--st-accent);outline-offset:-2px}
+ .st-ic{flex:none;display:grid;place-items:center;width:var(--st-ic);height:var(--st-ic);border-radius:var(--st-r-ic);background:var(--c,var(--st-gray))}
+ .st-ic .i{width:19px;height:19px;stroke:var(--on-accent);fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+@@ -2020,10 +2020,10 @@
+ {type:"sheet",set:"cnt",ic:"sliders",tone:"orange",t:()=>t().s[3][1],d:()=>t().s[3][2]},{type:"page",page:"interact",ic:"lock",tone:"purple",t:["التفاعل مع منشوراتك","Interactions on your posts"]}]},
+ {id:"notifications",t:["الإشعارات","Notifications"],rows:[
+ {type:"sheet",set:"ntf",ic:"bell",tone:"red",t:()=>t().s[2][1],d:()=>t().s[2][2]},
+-{type:"switch",key:"push",ic:"bell",tone:"red",auth:1,t:["إشعارات الجوال","Mobile notifications"],d:()=>window.madaPushHint?madaPushHint():""},
+-{type:"switch",key:"pmsg",ic:"msg",tone:"blue",auth:1,t:["إشعارات الرسائل","Message notifications"]},
+-{type:"switch",key:"preact",ic:"heart",tone:"red",auth:1,t:["إشعارات التفاعلات","Reaction notifications"]},
+-{type:"switch",key:"pfol",ic:"users",tone:"green",auth:1,t:["إشعارات المتابعات","Follow notifications"]}]},
++{type:"switch",key:"push",ic:"bell",tone:"red",auth:1,t:["إشعارات الجوال","Mobile notifications"],d:()=>window.madaPushHint?madaPushHint():"",dis:()=>window.madaPushDis?madaPushDis():false},
++{type:"switch",key:"pmsg",show:()=>!!(window.madaPush&&madaPush.on),ic:"msg",tone:"blue",auth:1,t:["إشعارات الرسائل","Message notifications"]},
++{type:"switch",key:"preact",show:()=>!!(window.madaPush&&madaPush.on),ic:"heart",tone:"red",auth:1,t:["إشعارات التفاعلات","Reaction notifications"]},
++{type:"switch",key:"pfol",show:()=>!!(window.madaPush&&madaPush.on),ic:"users",tone:"green",auth:1,t:["إشعارات المتابعات","Follow notifications"]}]},
+ {id:"appearance",t:["المظهر","Appearance"],rows:[
+ {type:"seg",key:"theme",ic:"palette",tone:"purple",t:()=>t().theme,opts:[["light","فاتح","Light"],["dark","داكن","Dark"],["auto","تلقائي","Auto"]]},
+ {type:"switch",key:"glass",ic:"eye",tone:"teal",t:["الزجاج السائل","Liquid Glass"]},
+@@ -2055,7 +2055,7 @@
+ glass:{get:()=>R.dataset.glass!=="off",apply:v=>{const g=v?"on":"off";try{localStorage.setItem("mada_glass",g)}catch(e){}R.dataset.glass=g;madaPrefs={...madaPrefs,glass:g}},
+ save:()=>pSave()},
+ vsound:{get:()=>!!madaPrefs.vsound,apply:v=>{madaPrefs={...madaPrefs,vsound:!!v}},save:()=>pSave()},
+-push:{get:()=>!!(window.madaPush&&madaPush.on),apply:v=>{if(window.madaPush)madaPush.on=!!v},save:v=>window.madaPush?madaPush.toggle(v):false},
++push:{re:1,get:()=>!!(window.madaPush&&madaPush.on),apply:v=>{if(window.madaPush)madaPush.on=!!v},save:v=>window.madaPush?madaPush.toggle(v):false},
+ pmsg:{get:()=>madaPrefs.pmsg!==false,apply:v=>{madaPrefs={...madaPrefs,pmsg:!!v}},save:async()=>(await pSave())&&window.madaPush?madaPush.syncPrefs():false},
+ preact:{get:()=>madaPrefs.preact!==false,apply:v=>{madaPrefs={...madaPrefs,preact:!!v}},save:async()=>(await pSave())&&window.madaPush?madaPush.syncPrefs():false},
+ pfol:{get:()=>madaPrefs.pfol!==false,apply:v=>{madaPrefs={...madaPrefs,pfol:!!v}},save:async()=>(await pSave())&&window.madaPush?madaPush.syncPrefs():false},
+@@ -2071,8 +2071,8 @@
+ let good=ok();if(good&&h.save)good=await h.save(val);
+ if(!good){h.apply(old);ok();sync();if(h.re)render();toast(L("تعذر الحفظ، تم التراجع عن التغيير","Couldn’t save. Change reverted."))}else toast(L("تم الحفظ","Saved"))}
+ /* ===== renderers ===== */
+-const row=r=>{if(r.auth&&!madaCurrentUser)return"";const T=esc(str(r.t)),d=r.d?str(r.d):"",ico=`<span class="st-ic" data-tone="${r.tone}" aria-hidden="true">${ic(r.ic)}</span>`,tx=`<span class="st-t"><b>${T}</b>${d?`<small>${esc(d)}</small>`:""}</span>`,ch=`<span class="st-ch" aria-hidden="true">${ic("chevron")}</span>`;
+-if(r.type==="switch")return `<button class="st-row" role="switch" aria-checked="${!!H[r.key].get()}" aria-label="${T}" data-stsw data-stk="${r.key}">${ico}${tx}<span class="st-sw" aria-hidden="true"><i></i></span></button>`;
++const row=r=>{if(r.auth&&!madaCurrentUser||r.show&&!r.show())return"";const T=esc(str(r.t)),d=r.d?str(r.d):"",ico=`<span class="st-ic" data-tone="${r.tone}" aria-hidden="true">${ic(r.ic)}</span>`,tx=`<span class="st-t"><b>${T}</b>${d?`<small>${esc(d)}</small>`:""}</span>`,ch=`<span class="st-ch" aria-hidden="true">${ic("chevron")}</span>`;
++if(r.type==="switch")return `<button class="st-row" role="switch" aria-checked="${!!H[r.key].get()}" aria-label="${T}"${r.dis&&r.dis()?" disabled aria-disabled=\"true\"":""} data-stsw data-stk="${r.key}">${ico}${tx}<span class="st-sw" aria-hidden="true"><i></i></span></button>`;
+ if(r.type==="seg"){const cur=String(H[r.key].get()),ix=Math.max(0,r.opts.findIndex(o=>o[0]===cur));return `<div class="st-segrow"><div class="st-top">${ico}${tx}</div><div class="st-seg" role="radiogroup" aria-label="${T}" data-sk="${r.key}" style="--n:${r.opts.length};--i:${ix}">${r.opts.map(o=>`<button role="radio" aria-checked="${o[0]===cur}" data-stk="${r.key}" data-stv="${o[0]}">${L(o[1],o[2])}</button>`).join("")}</div></div>`}
+ if(r.type==="info")return `<div class="st-row">${ico}${tx}</div>`;
+ const at=r.type==="page"?`data-stp="${r.page}"`:r.type==="link"?`data-go="${r.go}"`:`data-set="${r.set}"`;
+@@ -2169,10 +2169,11 @@
+ b64=s=>{const r=(s+"=".repeat((4-s.length%4)%4)).replace(/-/g,"+").replace(/_/g,"/"),a=atob(r);return Uint8Array.from(a,c=>c.charCodeAt(0))},
+ prefs=()=>({msg:madaPrefs.pmsg!==false,react:madaPrefs.preact!==false,follow:madaPrefs.pfol!==false}),
+ rr=()=>{if(S.view==="settings")render()};
++window.madaPushDis=()=>(iOS&&!standalone)||!sup()||Notification.permission==="denied";
+ window.madaPushHint=()=>{
+- if(iOS&&!standalone)return L("على iPhone: اضغط «مشاركة» ثم «إضافة إلى الشاشة الرئيسية» وافتح المنصة منها.","On iPhone: tap Share, then Add to Home Screen, and open MADA from there.");
++ if(iOS&&!standalone)return L("أضف المنصة إلى الشاشة الرئيسية أولًا","Add MADA to your Home Screen first");
+  if(!sup())return L("هذا المتصفح لا يدعم إشعارات الجوال.","This browser doesn’t support push notifications.");
+- if(Notification.permission==="denied")return L("الإشعارات محظورة. فعّلها من إعدادات المتصفح ← إعدادات الموقع ← الإشعارات، ثم أعد تحميل الصفحة.","Notifications are blocked. Enable them in your browser: Site settings → Notifications, then reload.");
++ if(Notification.permission==="denied")return L("فعّل الإشعارات من إعدادات المتصفح ثم أعد المحاولة","Enable notifications in your browser settings, then try again");
+  return L("تصلك الرسائل والتفاعلات على جهازك حتى لو كانت المنصة مغلقة.","Get messages and activity on your device even when MADA is closed.")};
+ async function getReg(){if(!P.reg){await navigator.serviceWorker.register("/sw.js");P.reg=await navigator.serviceWorker.ready}return P.reg}
+ async function save(sub){const j=sub.toJSON();return madaSb.rpc("push_subscribe",{p_endpoint:j.endpoint,p_p256dh:j.keys.p256dh,p_auth:j.keys.auth,p_device:ua.slice(0,120),p_prefs:prefs()})}
+@@ -2186,7 +2187,7 @@
+    if(Notification.permission!=="granted"&&await Notification.requestPermission()!=="granted"){rr();return false}
+    await subscribe();ls("mada_push_off",null);rr();return true}
+   const reg=await getReg(),sub=await reg.pushManager.getSubscription();
+-  if(sub){await madaSb.from("push_subscriptions").delete().eq("endpoint",sub.endpoint);await sub.unsubscribe()}
++  if(sub){const {error}=await madaSb.from("push_subscriptions").delete().eq("endpoint",sub.endpoint);if(error)return false;await sub.unsubscribe()}
+   ls("mada_push_off","1");return true
+  }catch(e){return false}};
+ P.syncPrefs=async()=>{if(!madaCurrentUser)return true;const {error}=await madaSb.from("push_subscriptions").update({prefs:prefs()}).eq("user_id",madaCurrentUser.id);return !error};
