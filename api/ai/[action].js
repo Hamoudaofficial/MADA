@@ -1,4 +1,5 @@
 const { neon } = require("@neondatabase/serverless");
+const crypto = require("crypto");
 const CFG = {
   gemini: { model: "gemini-flash-latest", rpd: 250 },
   groq: { model: "llama-3.3-70b-versatile", rpd: 1000 },
@@ -297,6 +298,54 @@ async function assist(req, res) {
   res.json({ text: out });
 }
 
+/* ---------- post summary (psum) + Neon cache ---------- */
+const mkRate = (map, lim) => uid => {
+  const n = Date.now(), a = (map.get(uid) || []).filter(t => n - t < 60000);
+  if (a.length >= lim) { map.set(uid, a); return true; }
+  a.push(n); map.set(uid, a); return false;
+};
+const psGen = new Map(), psHit = new Map();
+let _psT;
+const psTable = () => _psT || (_psT = q("create table if not exists ai_post_summaries(post_id uuid primary key,body_hash text not null,summary text not null,created_at timestamptz not null default now())").then(() => true, () => { _psT = null; return false; }));
+/* النص يُقرأ من قاعدة البيانات بجلسة المستخدم نفسها (RLS)، ولا يُؤخذ من العميل */
+async function postBody(req, id) {
+  try {
+    const r = await fetch(`${E.SUPABASE_URL}/rest/v1/posts?id=eq.${id}&deleted_at=is.null&select=body&limit=1`, { headers: { apikey: E.SUPABASE_ANON_KEY, Authorization: req.headers.authorization } });
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j && j[0] && typeof j[0].body === "string" ? j[0].body : null;
+  } catch (e) { return null; }
+}
+async function psum(req, res) {
+  if (req.method !== "POST") return fail(res, 405, "bad_request");
+  const u = await authUser(req);
+  if (!u) return fail(res, 401, "unauthorized");
+  const P = CONF.POST_SUMMARY, id = String(parse(req.body).post_id || "");
+  if (!UUID.test(id)) return fail(res, 400, "bad_request");
+  if (mkRate(psHit, P.CACHED_PER_MINUTE)(u.id)) return fail(res, 429, "rate_limited");
+  const raw = await postBody(req, id);
+  if (raw === null) return fail(res, 404, "not_found");
+  const text = clean(raw);
+  if (text.length <= P.MIN_LEN) return fail(res, 400, "bad_request");
+  const hash = crypto.createHash("sha256").update(text).digest("hex"), cacheOk = await psTable();
+  if (cacheOk) {
+    const c = await q("select summary from ai_post_summaries where post_id=$1 and body_hash=$2", [id, hash]).catch(() => []);
+    if (c.length) return res.json({ text: c[0].summary, cached: true });
+  }
+  const region = blockedRegion(req.headers["x-vercel-ip-country"]), body = text.slice(0, P.IN_MAX);
+  const order = pickOrder(body, { region });
+  if (!order.length) return res.status(503).json({ error: region ? "region_restricted" : "providers_busy" });
+  if (mkRate(psGen, P.PER_MINUTE)(u.id)) return fail(res, 429, "rate_limited");
+  if (!(await takeQuota(u.id))) return fail(res, 429, "quota_exceeded");
+  const ac = new AbortController(); res.on("close", () => ac.abort());
+  let out = "";
+  try { for await (const x of run(order, [{ role: "user", content: "<post>" + body + "</post>" }], P.SYSTEM, ac.signal)) if (x.text) out += x.text; } catch (e) {}
+  out = clean(out).replace(/^["«“]+|["»”]+$/g, "").slice(0, P.OUT_MAX).trim();
+  if (!out) { await refundQuota(u.id); return res.status(503).json({ error: "providers_busy" }); }
+  if (cacheOk) await q("insert into ai_post_summaries(post_id,body_hash,summary) values($1,$2,$3) on conflict (post_id) do update set body_hash=excluded.body_hash,summary=excluded.summary,created_at=now()", [id, hash, out]).catch(() => {});
+  res.json({ text: out, cached: false });
+}
+
 module.exports = async (req, res) => {
   const action = String((req.query && req.query.action) || "").toLowerCase();
   try {
@@ -304,6 +353,7 @@ module.exports = async (req, res) => {
     if (action === "chat") return await chat(req, res);
     if (action === "conversations" || action === "conversation") return await convs(action, req, res);
     if (action === "assist") return await assist(req, res);
+    if (action === "psum") return await psum(req, res);
     if (["quota", "memory", "settings"].includes(action)) return await simple(action, req, res);
     return fail(res, 404, "bad_request");
   } catch (e) {
